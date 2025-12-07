@@ -282,6 +282,12 @@ public class NetworkStackUtils {
             "apf_use_ra_lifetime_calculation_fix_version";
 
     /**
+     * Experiment flag to enable DHCPv6 Nontemporary Address(RFC8415) in IpClient.
+     */
+    public static final String IPCLIENT_DHCPV6_NONTEMPORARY_ADDRESS_VERSION =
+            "ipclient_dhcpv6_nontemporary_address_version";
+
+    /**
      * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
      */
     public static final String IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION =

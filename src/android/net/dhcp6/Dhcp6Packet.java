@@ -26,6 +26,8 @@ import androidx.annotation.NonNull;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.HexDump;
 import com.android.net.module.util.Struct;
+import com.android.net.module.util.structs.IaNaOption;
+import com.android.net.module.util.structs.IaAddressOption;
 import com.android.net.module.util.structs.IaPdOption;
 import com.android.net.module.util.structs.IaPrefixOption;
 
@@ -113,12 +115,22 @@ public class Dhcp6Packet {
     public boolean mRapidCommit;
 
     /**
+     * DHCPv6 Optional Type: IA_NA.
+     */
+    public static final byte DHCP6_IA_NA = 3;
+    protected final byte[] mIaNa;
+    protected NontemporaryAddresses mNontemporaryAddresses;
+
+    /**
+     * DHCPv6 Optional Type: IAADDR.
+     */
+    public static final byte DHCP6_IAADDR = 5;
+
+    /**
      * DHCPv6 Optional Type: IA_PD.
      */
     public static final byte DHCP6_IA_PD = 25;
-    @NonNull
     protected final byte[] mIaPd;
-    @NonNull
     protected PrefixDelegation mPrefixDelegation;
 
     /**
@@ -138,19 +150,25 @@ public class Dhcp6Packet {
     protected final int mTransId;
 
     /**
-     * The unique identifier for IA_NA, IA_TA, IA_PD used in this particular DHCPv6 negotiation
+     * The unique identifier for IA_NA used in this particular DHCPv6 negotiation
      */
-    protected int mIaId;
+    protected int mIaIdForNa;
+    /**
+     * The unique identifier for IA_PD used in this particular DHCPv6 negotiation
+     */
+    protected int mIaIdForPd;
+
     // Per rfc8415#section-12, the IAID MUST be consistent across restarts.
-    // Since currently only one IAID is supported, a well-known value can be used (0).
-    public static final int IAID = 0;
+    public static final int IAID_NA = 1;
+    public static final int IAID_PD = 0; // Follow the value of IAID in the Android standard code
 
     Dhcp6Packet(int transId, int elapsedTime, @NonNull final byte[] clientDuid,
-            final byte[] serverDuid, @NonNull final byte[] iapd) {
+            final byte[] serverDuid, final byte[] iana, final byte[] iapd) {
         mTransId = transId;
         mElapsedTime = elapsedTime;
         mClientDuid = clientDuid;
         mServerDuid = serverDuid;
+        mIaNa = iana;
         mIaPd = iapd;
     }
 
@@ -162,6 +180,14 @@ public class Dhcp6Packet {
     }
 
     /**
+     * Returns decoded IA_NA options associated with IA_ID.
+     */
+    @VisibleForTesting
+    public NontemporaryAddresses getNontemporaryAddresses() {
+        return mNontemporaryAddresses;
+    }
+
+    /**
      * Returns decoded IA_PD options associated with IA_ID.
      */
     @VisibleForTesting
@@ -170,10 +196,17 @@ public class Dhcp6Packet {
     }
 
     /**
+     * Returns IA_ID associated to IA_NA.
+     */
+    public int getIaIdForNa() {
+        return mIaIdForNa;
+    }
+
+    /**
      * Returns IA_ID associated to IA_PD.
      */
-    public int getIaId() {
-        return mIaId;
+    public int getIaIdForPd() {
+        return mIaIdForPd;
     }
 
     /**
@@ -196,6 +229,152 @@ public class Dhcp6Packet {
      */
     public OptionalInt getSolMaxRtMs() {
         return mSolMaxRt;
+    }
+
+    /**
+     * A class to take DHCPv6 IA_NA option allocated from server.
+     * https://www.rfc-editor.org/rfc/rfc8415.html#section-21.4
+     */
+    public static class NontemporaryAddresses {
+        public final int iaid;
+        public final int t1;
+        public final int t2;
+        @NonNull
+        public final List<IaAddressOption> iaos;
+
+        @VisibleForTesting
+        public NontemporaryAddresses(int iaid, int t1, int t2,
+                @NonNull final List<IaAddressOption> iaos) {
+            Objects.requireNonNull(iaos);
+            this.iaid = iaid;
+            this.t1 = t1;
+            this.t2 = t2;
+            this.iaos = iaos;
+        }
+        public boolean isValid() {
+            if (iaid != IAID_NA) {
+                Log.w(TAG, "IA_ID doesn't match, expected: " + IAID_NA + ", actual: " + iaid);
+                return false;
+            }
+            if (t1 < 0 || t2 < 0) {
+                Log.e(TAG, "IA_NA option with invalid T1 " + t1 + " or T2 " + t2);
+                return false;
+            }
+            // Generally, t1 must be smaller or equal to t2 (except when t2 is 0).
+            if (t2 != 0 && t1 > t2) {
+                Log.e(TAG, "IA_NA option with T1 " + t1 + " greater than T2 " + t2);
+                return false;
+            }
+            return true;
+        }
+        
+
+        /**
+         * Decode an IA_PD option from the byte buffer.
+         */
+        public static NontemporaryAddresses decode(@NonNull final ByteBuffer buffer)
+                throws ParseException {
+            try {
+                final int iaid = buffer.getInt();
+                final int t1 = buffer.getInt();
+                final int t2 = buffer.getInt();
+                final List<IaAddressOption> iaos = new ArrayList<IaAddressOption>();
+                while (buffer.remaining() > 0) {
+                    final int original = buffer.position();
+                    final short optionType = buffer.getShort();
+                    final int optionLen = buffer.getShort() & 0xFFFF;
+                    switch (optionType) {
+                        case DHCP6_IAADDR:
+                            buffer.position(original);
+                            final IaAddressOption ipo = Struct.parse(IaAddressOption.class, buffer);
+                            Log.d(TAG, "IA Address Option: " + ipo);
+                            iaos.add(ipo);
+                            break;
+                        default:
+                            skipOption(buffer, optionLen);
+                    }
+                }
+                return new NontemporaryAddresses(iaid, t1, t2, iaos);
+            } catch (BufferUnderflowException e) {
+                throw new ParseException(e.getMessage());
+            }
+        }
+
+        /**
+         * Build an IA_NA option from given specific parameters, including IA_ADDRESS options.
+         */
+        public ByteBuffer build() {
+            return build(iaos);
+        }
+
+        /**
+         * Build an IA_NA option from given specific parameters, including IA_ADDRESS options.
+         */
+        public ByteBuffer build(@NonNull final List<IaAddressOption> input) {
+            final ByteBuffer iana = ByteBuffer.allocate(IaNaOption.LENGTH
+                    + Struct.getSize(IaAddressOption.class) * input.size());
+            iana.putInt(iaid);
+            iana.putInt(t1);
+            iana.putInt(t2);
+            for (IaAddressOption ipo : input) {
+                ipo.writeToByteBuffer(iana);
+            }
+            iana.flip();
+            return iana;
+        }
+
+        public List<IaAddressOption> getValidIaAddresses() {
+            final List<IaAddressOption> validIpos = new ArrayList<IaAddressOption>();
+            for (IaAddressOption ipo : iaos) {
+                if (!ipo.isValid()) continue;
+                validIpos.add(ipo);
+            }
+            return validIpos;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("Non-Temporary Addresses, iaid: %s, t1: %s, t2: %s,"
+                    + " IA address options: %s", iaid, t1, t2, iaos);
+        }
+
+        /**
+         * Compare the preferred lifetime in the IA address option list and return the minimum one.
+         */
+        public long getMinimalPreferredLifetime() {
+            long min = Long.MAX_VALUE;
+            for (IaAddressOption iao : iaos) {
+                min = (iao.preferred != 0 && min > iao.preferred) ? iao.preferred : min;
+            }
+            return min;
+        }
+
+        /**
+         * Compare the valid lifetime in the IA address optin list and return the minimum one.
+         */
+        public long getMinimalValidLifetime() {
+            long min = Long.MAX_VALUE;
+            for (IaAddressOption iao : iaos) {
+                min = (iao.valid != 0 && min > iao.valid) ? iao.valid : min;
+            }
+            return min;
+        }
+
+        /**
+         * Return IA address option list to be renewed/rebound.
+         *
+         * Per RFC8415#section-18.2.4, client must not include any addresses that it didn't obtain
+         * from server or that are no longer valid (that have a valid lifetime of 0). Section-18.3.4
+         * also mentions that server can inform client that it will not extend the address by setting
+         * T1 and T2 to values equal to the valid lifetime, so in this case client has no point in
+         * renewing as well.
+         */
+        public List<IaAddressOption> getRenewableIaAddresses() {
+            final List<IaAddressOption> toBeRenewed = getValidIaAddresses();
+            toBeRenewed.removeIf(iao -> iao.preferred == 0 && iao.valid == 0);
+            toBeRenewed.removeIf(iao -> t1 == iao.valid && t2 == iao.valid);
+            return toBeRenewed;
+        }
     }
 
     /**
@@ -232,8 +411,8 @@ public class Dhcp6Packet {
          * TODO: ensure that the prefix has a reasonable lifetime, and the timers aren't too short.
          */
         public boolean isValid() {
-            if (iaid != IAID) {
-                Log.w(TAG, "IA_ID doesn't match, expected: " + IAID + ", actual: " + iaid);
+            if (iaid != IAID_PD) {
+                Log.w(TAG, "IA_ID doesn't match, expected: " + IAID_PD + ", actual: " + iaid);
                 return false;
             }
             if (t1 < 0 || t2 < 0) {
@@ -438,12 +617,14 @@ public class Dhcp6Packet {
      */
     private static Dhcp6Packet decode(@NonNull final ByteBuffer packet) throws ParseException {
         int elapsedTime = 0;
+        byte[] iana = null;
         byte[] iapd = null;
         byte[] serverDuid = null;
         byte[] clientDuid = null;
         short statusCode = STATUS_SUCCESS;
         boolean rapidCommit = false;
         int solMaxRt = 0;
+        NontemporaryAddresses na = null;
         PrefixDelegation pd = null;
 
         packet.order(ByteOrder.BIG_ENDIAN);
@@ -484,11 +665,18 @@ public class Dhcp6Packet {
                         packet.get(cduid, 0 /* offset */, expectedLen);
                         clientDuid = cduid;
                         break;
+                    case DHCP6_IA_NA:
+                        expectedLen = optionLen;
+                        final byte[] iaNaBytes = new byte[expectedLen];
+                        packet.get(iaNaBytes, 0 /* offset */, expectedLen);
+                        iana = iaNaBytes;
+                        na = NontemporaryAddresses.decode(ByteBuffer.wrap(iana));
+                        break;
                     case DHCP6_IA_PD:
                         expectedLen = optionLen;
-                        final byte[] bytes = new byte[expectedLen];
-                        packet.get(bytes, 0 /* offset */, expectedLen);
-                        iapd = bytes;
+                        final byte[] iaPdBytes = new byte[expectedLen];
+                        packet.get(iaPdBytes, 0 /* offset */, expectedLen);
+                        iapd = iaPdBytes;
                         pd = PrefixDelegation.decode(ByteBuffer.wrap(iapd));
                         break;
                     case DHCP6_RAPID_COMMIT:
@@ -533,34 +721,34 @@ public class Dhcp6Packet {
 
         switch(messageType) {
             case DHCP6_MESSAGE_TYPE_SOLICIT:
-                newPacket = new Dhcp6SolicitPacket(transId, elapsedTime, clientDuid, iapd,
-                        rapidCommit);
+                newPacket = new Dhcp6SolicitPacket(transId, elapsedTime, clientDuid, iana, iapd, rapidCommit);
                 break;
             case DHCP6_MESSAGE_TYPE_ADVERTISE:
-                newPacket = new Dhcp6AdvertisePacket(transId, clientDuid, serverDuid, iapd);
+                newPacket = new Dhcp6AdvertisePacket(transId, clientDuid, serverDuid, iana, iapd);
                 break;
             case DHCP6_MESSAGE_TYPE_REQUEST:
-                newPacket = new Dhcp6RequestPacket(transId, elapsedTime, clientDuid, serverDuid,
-                        iapd);
+                newPacket = new Dhcp6RequestPacket(transId, elapsedTime, clientDuid, serverDuid, iana, iapd);
                 break;
             case DHCP6_MESSAGE_TYPE_REPLY:
-                newPacket = new Dhcp6ReplyPacket(transId, clientDuid, serverDuid, iapd,
-                        rapidCommit);
+                newPacket = new Dhcp6ReplyPacket(transId, clientDuid, serverDuid, iana, iapd, rapidCommit);
                 break;
             case DHCP6_MESSAGE_TYPE_RENEW:
-                newPacket = new Dhcp6RenewPacket(transId, elapsedTime, clientDuid, serverDuid,
-                        iapd);
+                newPacket = new Dhcp6RenewPacket(transId, elapsedTime, clientDuid, serverDuid, iana, iapd);
                 break;
             case DHCP6_MESSAGE_TYPE_REBIND:
-                newPacket = new Dhcp6RebindPacket(transId, elapsedTime, clientDuid, iapd);
+                newPacket = new Dhcp6RebindPacket(transId, elapsedTime, clientDuid, iana, iapd);
                 break;
             default:
                 throw new ParseException("Unimplemented DHCP6 message type %d" + messageType);
         }
 
+        if (na != null) {
+            newPacket.mIaIdForNa = na.iaid;
+            newPacket.mNontemporaryAddresses = na;
+        }
         if (pd != null) {
+            newPacket.mIaIdForPd = pd.iaid;
             newPacket.mPrefixDelegation = pd;
-            newPacket.mIaId = pd.iaid;
         }
         newPacket.mStatusCode = statusCode;
         newPacket.mRapidCommit = rapidCommit;
@@ -598,12 +786,12 @@ public class Dhcp6Packet {
             Log.e(TAG, "Unexpected transaction ID " + mTransId + ", expected " + transId);
             return false;
         }
-        if (mPrefixDelegation == null) {
-            Log.e(TAG, "DHCPv6 message without IA_PD option, ignoring");
+        if (mNontemporaryAddresses == null && mPrefixDelegation == null) {
+            Log.e(TAG, "DHCPv6 message without IA_NA or IA_PD option, ignoring");
             return false;
         }
-        if (!mPrefixDelegation.isValid()) {
-            Log.e(TAG, "DHCPv6 message takes invalid IA_PD option, ignoring");
+        if (!mNontemporaryAddresses.isValid() && !mPrefixDelegation.isValid()) {
+            Log.e(TAG, "DHCPv6 message takes invalid IA_NA and IA_PD option, ignoring");
             return false;
         }
         //TODO: check if the status code is success or not.
@@ -673,31 +861,31 @@ public class Dhcp6Packet {
      * Builds a DHCPv6 SOLICIT packet from the required specified parameters.
      */
     public static ByteBuffer buildSolicitPacket(int transId, long millisecs,
-            @NonNull final byte[] iapd, @NonNull final byte[] clientDuid, boolean rapidCommit) {
+            final byte[] iana, final byte[] iapd, @NonNull final byte[] clientDuid, boolean rapidCommit) {
         final Dhcp6SolicitPacket pkt =
                 new Dhcp6SolicitPacket(transId, (int) (millisecs / 10) /* elapsed time */,
-                        clientDuid, iapd, rapidCommit);
+                        clientDuid, iana, iapd, rapidCommit);
         return pkt.buildPacket();
     }
 
     /**
      * Builds a DHCPv6 ADVERTISE packet from the required specified parameters.
      */
-    public static ByteBuffer buildAdvertisePacket(int transId, @NonNull final byte[] iapd,
+    public static ByteBuffer buildAdvertisePacket(int transId, final byte[] iana, final byte[] iapd,
             @NonNull final byte[] clientDuid, @NonNull final byte[] serverDuid) {
         final Dhcp6AdvertisePacket pkt =
-                new Dhcp6AdvertisePacket(transId, clientDuid, serverDuid, iapd);
+                new Dhcp6AdvertisePacket(transId, clientDuid, serverDuid, iana, iapd);
         return pkt.buildPacket();
     }
 
     /**
      * Builds a DHCPv6 REPLY packet from the required specified parameters.
      */
-    public static ByteBuffer buildReplyPacket(int transId, @NonNull final byte[] iapd,
+    public static ByteBuffer buildReplyPacket(int transId, final byte[] iana, final byte[] iapd,
             @NonNull final byte[] clientDuid, @NonNull final byte[] serverDuid,
             boolean rapidCommit) {
         final Dhcp6ReplyPacket pkt =
-                new Dhcp6ReplyPacket(transId, clientDuid, serverDuid, iapd, rapidCommit);
+                new Dhcp6ReplyPacket(transId, clientDuid, serverDuid, iana, iapd, rapidCommit);
         return pkt.buildPacket();
     }
 
@@ -705,11 +893,11 @@ public class Dhcp6Packet {
      * Builds a DHCPv6 REQUEST packet from the required specified parameters.
      */
     public static ByteBuffer buildRequestPacket(int transId, long millisecs,
-            @NonNull final byte[] iapd, @NonNull final byte[] clientDuid,
+            final byte[] iana, final byte[] iapd, @NonNull final byte[] clientDuid,
             @NonNull final byte[] serverDuid) {
         final Dhcp6RequestPacket pkt =
                 new Dhcp6RequestPacket(transId, (int) (millisecs / 10) /* elapsed time */,
-                        clientDuid, serverDuid, iapd);
+                        clientDuid, serverDuid, iana, iapd);
         return pkt.buildPacket();
     }
 
@@ -717,11 +905,11 @@ public class Dhcp6Packet {
      * Builds a DHCPv6 RENEW packet from the required specified parameters.
      */
     public static ByteBuffer buildRenewPacket(int transId, long millisecs,
-            @NonNull final byte[] iapd, @NonNull final byte[] clientDuid,
+            final byte[] iana, final byte[] iapd, @NonNull final byte[] clientDuid,
             @NonNull final byte[] serverDuid) {
         final Dhcp6RenewPacket pkt =
                 new Dhcp6RenewPacket(transId, (int) (millisecs / 10) /* elapsed time */, clientDuid,
-                        serverDuid, iapd);
+                        serverDuid, iana, iapd);
         return pkt.buildPacket();
     }
 
@@ -729,9 +917,9 @@ public class Dhcp6Packet {
      * Builds a DHCPv6 REBIND packet from the required specified parameters.
      */
     public static ByteBuffer buildRebindPacket(int transId, long millisecs,
-            @NonNull final byte[] iapd, @NonNull final byte[] clientDuid) {
+            final byte[] iana, final byte[] iapd, @NonNull final byte[] clientDuid) {
         final Dhcp6RebindPacket pkt = new Dhcp6RebindPacket(transId,
-                (int) (millisecs / 10) /* elapsed time */, clientDuid, iapd);
+                (int) (millisecs / 10) /* elapsed time */, clientDuid, iana, iapd);
         return pkt.buildPacket();
     }
 }

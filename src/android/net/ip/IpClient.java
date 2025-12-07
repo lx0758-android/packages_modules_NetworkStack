@@ -43,6 +43,7 @@ import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_L
 import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_IE_ID;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
+import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_NONTEMPORARY_ADDRESS_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DISABLE_ACCEPT_RA_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_GARP_NA_ROAMING_VERSION;
@@ -126,6 +127,7 @@ import com.android.net.module.util.SharedLog;
 import com.android.net.module.util.SocketUtils;
 import com.android.net.module.util.ip.InterfaceController;
 import com.android.net.module.util.netlink.NetlinkUtils;
+import com.android.net.module.util.structs.IaAddressOption;
 import com.android.net.module.util.structs.IaPrefixOption;
 import com.android.networkstack.R;
 import com.android.networkstack.apishim.NetworkInformationShimImpl;
@@ -526,6 +528,8 @@ public class IpClient extends StateMachine {
 
     // IpClient shares a handler with Dhcp6Client: commands must not overlap
     public static final int DHCP6CLIENT_CMD_BASE = 2000;
+    private static final int DHCPV6_NONTEMPORARY_ADDRESS_FLAGS =
+            IFA_F_NOPREFIXROUTE;
     private static final int DHCPV6_PREFIX_DELEGATION_ADDRESS_FLAGS =
             IFA_F_MANAGETEMPADDR | IFA_F_NOPREFIXROUTE | IFA_F_NODAD;
 
@@ -653,6 +657,9 @@ public class IpClient extends StateMachine {
     private final Set<Inet6Address> mGratuitousNaTargetAddresses = new HashSet<>();
     // Set of IPv6 addresses from which multicast NS packets have been sent.
     private final Set<Inet6Address> mMulticastNsSourceAddresses = new HashSet<>();
+
+    // Set of non-temporary addresses.
+    private final Set<Inet6Address> mNontemporaryAddresses = new HashSet<>();
     // Set of delegated prefixes.
     private final Set<IpPrefix> mDelegatedPrefixes = new HashSet<>();
 
@@ -660,7 +667,11 @@ public class IpClient extends StateMachine {
     private final int mMinRdnssLifetimeSec;
 
     // Experiment flag read from device config.
+    private final boolean mDhcp6NontemporaryAddressEnabled;
     private final boolean mDhcp6PrefixDelegationEnabled;
+    private final boolean mDhcp6AllowHasIpv6ForceEnabled = false;
+    private final boolean mDhcp6AllowNotDefaultRouteEnabled = false;
+    private final boolean mDhcp6AllowNotGlobalPreferredEnabled = false;
 
     private InterfaceParams mInterfaceParams;
 
@@ -731,8 +742,9 @@ public class IpClient extends StateMachine {
          * Get a Dhcp6Client instance.
          */
         public Dhcp6Client makeDhcp6Client(Context context, StateMachine controller,
-                InterfaceParams ifParams, Dhcp6Client.Dependencies deps) {
-            return Dhcp6Client.makeDhcp6Client(context, controller, ifParams, deps);
+                InterfaceParams ifParams, Dhcp6Client.Dependencies deps,
+                boolean naEnabled, boolean pdEnabled) {
+            return Dhcp6Client.makeDhcp6Client(context, controller, ifParams, deps, naEnabled, pdEnabled);
         }
 
         /**
@@ -849,6 +861,8 @@ public class IpClient extends StateMachine {
         mNetd = deps.getNetd(mContext);
         mInterfaceCtrl = new InterfaceController(mInterfaceName, mNetd, mLog);
 
+        mDhcp6NontemporaryAddressEnabled = mDependencies.isFeatureEnabled(mContext,
+                IPCLIENT_DHCPV6_NONTEMPORARY_ADDRESS_VERSION, true);
         mDhcp6PrefixDelegationEnabled = mDependencies.isFeatureEnabled(mContext,
                 IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION, true);
 
@@ -1692,6 +1706,9 @@ public class IpClient extends StateMachine {
         // removed list before checking the added list(e.g. anyway we can add the removed prefix
         // back again).
         for (LinkAddress la : results.removed) {
+            if (mDhcp6NontemporaryAddressEnabled && isIpv6NontemporaryAddress(la)) {
+                mNontemporaryAddresses.remove(la.getAddress());
+            }
             if (mDhcp6PrefixDelegationEnabled && isIpv6StableDelegatedAddress(la)) {
                 final IpPrefix prefix = new IpPrefix(la.getAddress(), RFC7421_PREFIX_LENGTH);
                 mDelegatedPrefixes.remove(prefix);
@@ -1700,6 +1717,9 @@ public class IpClient extends StateMachine {
         }
 
         for (LinkAddress la : results.added) {
+            if (mDhcp6NontemporaryAddressEnabled && isIpv6NontemporaryAddress(la)) {
+                mNontemporaryAddresses.add((Inet6Address) la.getAddress());
+            }
             if (mDhcp6PrefixDelegationEnabled && isIpv6StableDelegatedAddress(la)) {
                 final IpPrefix prefix = new IpPrefix(la.getAddress(), RFC7421_PREFIX_LENGTH);
                 mDelegatedPrefixes.add(prefix);
@@ -1742,7 +1762,12 @@ public class IpClient extends StateMachine {
             // TODO: also look at the IPv6 RA (netlink) for captive portal URL
         }
 
-        // [4] Add route with delegated prefix according to the global address update.
+        // [4] Add route with non-temporary address and delegated prefix according to the global address update.
+        if (mDhcp6NontemporaryAddressEnabled) {
+            for (Inet6Address address : mNontemporaryAddresses) {
+                // TODO: add route with non-temporary delegated prefix.
+            }
+        }
         if (mDhcp6PrefixDelegationEnabled) {
             for (IpPrefix destination : mDelegatedPrefixes) {
                 // Direct-connected route to delegated prefix. Add RTN_UNREACHABLE to
@@ -1761,7 +1786,7 @@ public class IpClient extends StateMachine {
             }
         }
 
-        // [4] Add in TCP buffer sizes and HTTP Proxy config, if available.
+        // [5] Add in TCP buffer sizes and HTTP Proxy config, if available.
         if (!TextUtils.isEmpty(mTcpBufferSizes)) {
             newLp.setTcpBufferSizes(mTcpBufferSizes);
         }
@@ -1769,7 +1794,7 @@ public class IpClient extends StateMachine {
             newLp.setHttpProxy(mHttpProxy);
         }
 
-        // [5] Add data from InitialConfiguration
+        // [6] Add data from InitialConfiguration
         if (mConfiguration != null && mConfiguration.mInitialConfig != null) {
             InitialConfiguration config = mConfiguration.mInitialConfig;
             // Add InitialConfiguration routes and dns server addresses once all addresses
@@ -1960,6 +1985,19 @@ public class IpClient extends StateMachine {
 
     }
 
+    // Check whether a global IPv6 stable address is derived from DHCPv6 non-temporary address.
+    // Address derived from non-temporary address should be:
+    // - unicast global routable address
+    // - with prefix length of 128
+    // - has IFA_F_NOPREFIXROUTE flags
+    private static boolean isIpv6NontemporaryAddress(@NonNull final LinkAddress la) {
+        return la.isIpv6()
+                && !ConnectivityUtils.isIPv6ULA(la.getAddress())
+                && (la.getPrefixLength() == 128)
+                && (la.getScope() == (byte) RT_SCOPE_UNIVERSE)
+                && hasFlag(la, DHCPV6_NONTEMPORARY_ADDRESS_FLAGS);
+    }
+
     // Check whether a global IPv6 stable address is derived from DHCPv6 prefix delegation.
     // Address derived from delegated prefix should be:
     // - unicast global routable address
@@ -1989,8 +2027,9 @@ public class IpClient extends StateMachine {
         // doesn't complete with success after timeout. This check also handles IPv6-only link
         // local mode case, since there will be no IPv6 default route in that mode even with Prefix
         // Delegation experiment flag enabled.
-        if (mDhcp6PrefixDelegationEnabled
-                && newLp.hasIpv6DefaultRoute()
+        Log.d(mTag, "handle link properties update, has default IPv6 route:" + newLp.hasIpv6DefaultRoute());
+        if ((mDhcp6NontemporaryAddressEnabled || mDhcp6PrefixDelegationEnabled)
+                && (newLp.hasIpv6DefaultRoute() || mDhcp6AllowNotDefaultRouteEnabled)
                 && mIpv6AutoconfTimeoutAlarm == null) {
             mIpv6AutoconfTimeoutAlarm = new WakeupMessage(mContext, getHandler(),
                     mTag + ".EVENT_IPV6_AUTOCONF_TIMEOUT", EVENT_IPV6_AUTOCONF_TIMEOUT);
@@ -2197,14 +2236,15 @@ public class IpClient extends StateMachine {
                 && mInterfaceCtrl.enableIPv6();
     }
 
-    private void startDhcp6PrefixDelegation() {
-        if (!mDhcp6PrefixDelegationEnabled) return;
+    private void startDhcp6Client() {
+        if (!mDhcp6NontemporaryAddressEnabled && !mDhcp6PrefixDelegationEnabled) return;
         if (mDhcp6Client != null) {
-            Log.wtf(mTag, "Dhcp6Client should never be non-null in startDhcp6PrefixDelegation");
+            Log.wtf(mTag, "Dhcp6Client should never be non-null in startDhcp6Client");
             return;
         }
         mDhcp6Client = mDependencies.makeDhcp6Client(mContext, IpClient.this, mInterfaceParams,
-                mDependencies.getDhcp6ClientDependencies());
+                mDependencies.getDhcp6ClientDependencies(),
+                mDhcp6NontemporaryAddressEnabled, mDhcp6PrefixDelegationEnabled);
         mDhcp6Client.sendMessage(Dhcp6Client.CMD_START_DHCP6);
     }
 
@@ -2394,6 +2434,8 @@ public class IpClient extends StateMachine {
             mHasDisabledIpv6OrAcceptRaOnProvLoss = false;
             mGratuitousNaTargetAddresses.clear();
             mMulticastNsSourceAddresses.clear();
+
+            mNontemporaryAddresses.clear();
             mDelegatedPrefixes.clear();
 
             resetLinkProperties();
@@ -2862,21 +2904,63 @@ public class IpClient extends StateMachine {
             }
         }
 
+        private void deleteIpv6Addresses(final Inet6Address address) {
+            for (LinkAddress la : mLinkProperties.getLinkAddresses()) {
+                final InetAddress addr = la.getAddress();
+                if (address.equals(addr)) {
+                    if (!NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index,
+                            (Inet6Address) addr, (short) la.getPrefixLength())) {
+                        Log.e(mTag, "Failed to delete IPv6 address " + address.getHostAddress());
+                    }
+                }
+            }
+        }
+
         private void deleteIpv6PrefixDelegationAddresses(final IpPrefix prefix) {
             for (LinkAddress la : mLinkProperties.getLinkAddresses()) {
                 final InetAddress address = la.getAddress();
                 if (prefix.contains(address)) {
                     if (!NetlinkUtils.sendRtmDelAddressRequest(mInterfaceParams.index,
                             (Inet6Address) address, (short) la.getPrefixLength())) {
-                        Log.e(TAG, "Failed to delete IPv6 address " + address.getHostAddress());
+                        Log.e(mTag, "Failed to delete IPv6 address " + address.getHostAddress());
                     }
                 }
             }
         }
 
         private void addInterfaceAddress(@Nullable final Inet6Address address,
+                @NonNull final IaAddressOption iao) {
+            final int flags = DHCPV6_NONTEMPORARY_ADDRESS_FLAGS;
+            final long now = SystemClock.elapsedRealtime();
+            // Per RFC8415 section 21.22 the preferred/valid lifetime in IA Address option
+            // expressed in units of seconds.
+            final long deprecationTime = now + iao.preferred * 1000;
+            final long expirationTime = now + iao.valid * 1000;
+            final LinkAddress la;
+            try {
+                la = new LinkAddress(address, 128, flags,
+                        RT_SCOPE_UNIVERSE /* scope */, deprecationTime, expirationTime);
+            } catch (IllegalArgumentException e) {
+                Log.e(mTag, "Invalid IA_NA IPv6 link address " + e);
+                return;
+            }
+            if (!mDhcp6AllowNotGlobalPreferredEnabled && !la.isGlobalPreferred()) {
+                Log.w(mTag, "add interface address for IA_NA, " + la + " is not a global IPv6 address");
+                return;
+            }
+            Log.i(mTag, "add interface address for IA_NA, address is " + la);
+            if (!NetlinkUtils.sendRtmNewAddressRequest(mInterfaceParams.index, address,
+                    (short) 128,
+                    flags, (byte) RT_SCOPE_UNIVERSE /* scope */,
+                    iao.preferred, iao.valid)) {
+                Log.e(mTag, "Failed to set IPv6 address on " + address.getHostAddress()
+                        + "%" + mInterfaceParams.index + " for IA_NA");
+            }
+        }
+
+        private void addInterfaceAddress(@Nullable final Inet6Address address,
                 @NonNull final IaPrefixOption ipo) {
-            final int flags = IFA_F_NOPREFIXROUTE | IFA_F_MANAGETEMPADDR | IFA_F_NODAD;
+            final int flags = DHCPV6_PREFIX_DELEGATION_ADDRESS_FLAGS;
             final long now = SystemClock.elapsedRealtime();
             // Per RFC8415 section 21.22 the preferred/valid lifetime in IA Prefix option
             // expressed in units of seconds.
@@ -2887,19 +2971,51 @@ public class IpClient extends StateMachine {
                 la = new LinkAddress(address, RFC7421_PREFIX_LENGTH, flags,
                         RT_SCOPE_UNIVERSE /* scope */, deprecationTime, expirationTime);
             } catch (IllegalArgumentException e) {
-                Log.e(TAG, "Invalid IPv6 link address " + e);
+                Log.e(mTag, "Invalid IA_PD IPv6 link address " + e);
                 return;
             }
-            if (!la.isGlobalPreferred()) {
-                Log.w(TAG, la + " is not a global IPv6 address");
+            if (!mDhcp6AllowNotGlobalPreferredEnabled && !la.isGlobalPreferred()) {
+                Log.w(mTag, "add interface address for IA_PD, " + la + " is not a global IPv6 address");
                 return;
             }
+            Log.i(mTag, "add interface address for IA_PD, address is " + la);
             if (!NetlinkUtils.sendRtmNewAddressRequest(mInterfaceParams.index, address,
                     (short) RFC7421_PREFIX_LENGTH,
                     flags, (byte) RT_SCOPE_UNIVERSE /* scope */,
                     ipo.preferred, ipo.valid)) {
-                Log.e(TAG, "Failed to set IPv6 address on " + address.getHostAddress()
-                        + "%" + mInterfaceParams.index);
+                Log.e(mTag, "Failed to set IPv6 address on " + address.getHostAddress()
+                        + "%" + mInterfaceParams.index + " for IA_PD");
+            }
+        }
+
+        private void updateNontemporaryAddresses(@NonNull final List<IaAddressOption> valid) {
+            if (valid.isEmpty()) return;
+            final List<Inet6Address> zeroLifetimeAddressList = new ArrayList<>();
+            for (IaAddressOption iao : valid) {
+                final Inet6Address address = (Inet6Address) iao.getAddress();
+                if (iao.withZeroLifetimes()) {
+                    zeroLifetimeAddressList.add(address);
+                    continue;
+                }
+                addInterfaceAddress(address, iao);
+            }
+
+            // Delete global IPv6 addresses derived from prefix with 0 preferred/valid lifetime.
+            if (!zeroLifetimeAddressList.isEmpty()) {
+                for (Inet6Address address : zeroLifetimeAddressList) {
+                    Log.d(mTag, "Delete IPv6 address " + address
+                            + " with 0 preferred/valid lifetime");
+                    deleteIpv6Addresses(address);
+                }
+            }
+        }
+
+        private void updateExpiredNontemporaryAddresses(@NonNull final List<IaAddressOption> expired) {
+            if (expired.isEmpty()) return;
+            for (IaAddressOption iao : expired) {
+                final Inet6Address address = (Inet6Address) iao.getAddress();
+                Log.d(mTag, "Delete IPv6 address derived from expired address " + address);
+                deleteIpv6Addresses(address);
             }
         }
 
@@ -2934,7 +3050,7 @@ public class IpClient extends StateMachine {
             // Delete global IPv6 addresses derived from prefix with 0 preferred/valid lifetime.
             if (!zeroLifetimePrefixList.isEmpty()) {
                 for (IpPrefix prefix : zeroLifetimePrefixList) {
-                    Log.d(TAG, "Delete IPv6 address derived from prefix " + prefix
+                    Log.d(mTag, "Delete IPv6 address derived from prefix " + prefix
                             + " with 0 preferred/valid lifetime");
                     deleteIpv6PrefixDelegationAddresses(prefix);
                 }
@@ -2945,7 +3061,7 @@ public class IpClient extends StateMachine {
             if (expired.isEmpty()) return;
             for (IaPrefixOption ipo : expired) {
                 final IpPrefix prefix = ipo.getIpPrefix();
-                Log.d(TAG, "Delete IPv6 address derived from expired prefix " + prefix);
+                Log.d(mTag, "Delete IPv6 address derived from expired prefix " + prefix);
                 deleteIpv6PrefixDelegationAddresses(prefix);
             }
         }
@@ -3060,10 +3176,14 @@ public class IpClient extends StateMachine {
                     // route but no addresses via an RA.
                     // TODO: leverage the P flag in RA to determine if starting DHCPv6 PD or not,
                     // which is more clear and straightforward.
-                    if (!hasIpv6Address(mLinkProperties)
-                            && mLinkProperties.hasIpv6DefaultRoute()) {
-                        Log.d(TAG, "Network supports IPv6 but not autoconf, starting DHCPv6 PD");
-                        startDhcp6PrefixDelegation();
+                    if ((!hasIpv6Address(mLinkProperties) || mDhcp6AllowHasIpv6ForceEnabled)
+                            && (mLinkProperties.hasIpv6DefaultRoute() || mDhcp6AllowNotDefaultRouteEnabled)) {
+                        if (!hasIpv6Address(mLinkProperties)) {
+                            Log.d(mTag, "Network supports IPv6 but not autoconf, starting DHCPv6");
+                        } else {
+                            Log.d(mTag, "Network has IPv6 address, force starting DHCPv6");
+                        }
+                        startDhcp6Client();
                     }
                     break;
 
@@ -3143,15 +3263,17 @@ public class IpClient extends StateMachine {
 
                 case Dhcp6Client.CMD_DHCP6_RESULT:
                     switch(msg.arg1) {
-                        case Dhcp6Client.DHCP6_PD_SUCCESS:
-                            final List<IaPrefixOption> toBeUpdated = (List<IaPrefixOption>) msg.obj;
-                            updateDelegatedAddresses(toBeUpdated);
+                        case Dhcp6Client.DHCP6_SUCCESS:
+                            final Dhcp6Client.Dhcp6Result toBeUpdated = (Dhcp6Client.Dhcp6Result) msg.obj;
+                            updateNontemporaryAddresses(toBeUpdated.iaos);
+                            updateDelegatedAddresses(toBeUpdated.ipos);
                             handleLinkPropertiesUpdate(SEND_CALLBACKS);
                             break;
 
-                        case Dhcp6Client.DHCP6_PD_PREFIX_EXPIRED:
-                            final List<IaPrefixOption> toBeRemoved = (List<IaPrefixOption>) msg.obj;
-                            removeExpiredDelegatedAddresses(toBeRemoved);
+                        case Dhcp6Client.DHCP6_EXPIRED:
+                            final Dhcp6Client.Dhcp6Result toBeRemoved = (Dhcp6Client.Dhcp6Result) msg.obj;
+                            updateExpiredNontemporaryAddresses(toBeRemoved.iaos);
+                            removeExpiredDelegatedAddresses(toBeRemoved.ipos);
                             handleLinkPropertiesUpdate(SEND_CALLBACKS);
                             break;
 

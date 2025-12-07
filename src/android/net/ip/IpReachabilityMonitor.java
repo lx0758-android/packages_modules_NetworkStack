@@ -528,7 +528,7 @@ public class IpReachabilityMonitor {
         for (Map.Entry<InetAddress, NeighborEvent> entry : mNeighborWatchList.entrySet()) {
             if (DBG) {
                 Log.d(TAG, "neighbour IPv4(v6): " + entry.getKey() + " neighbour state: "
-                        + StructNdMsg.stringForNudState(entry.getValue().nudState));
+                        + StructNdMsg.stringForNudState(entry.getValue() != null ? entry.getValue().nudState : 0));
             }
             final NeighborEvent val = entry.getValue();
             // If an entry is null, consider that probing for that neighbour has completed.

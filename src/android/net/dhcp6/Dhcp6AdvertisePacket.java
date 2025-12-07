@@ -33,8 +33,8 @@ public class Dhcp6AdvertisePacket extends Dhcp6Packet {
      * Generates an advertise packet with the specified parameters.
      */
     Dhcp6AdvertisePacket(int transId, @NonNull final byte[] clientDuid,
-            @NonNull final byte[] serverDuid, final byte[] iapd) {
-        super(transId, 0 /* elapsedTime */, clientDuid, serverDuid, iapd);
+            @NonNull final byte[] serverDuid, final byte[] iana, final byte[] iapd) {
+        super(transId, 0 /* elapsedTime */, clientDuid, serverDuid, iana, iapd);
     }
 
     /**
@@ -47,7 +47,12 @@ public class Dhcp6AdvertisePacket extends Dhcp6Packet {
 
         addTlv(packet, DHCP6_CLIENT_IDENTIFIER, mClientDuid);
         addTlv(packet, DHCP6_SERVER_IDENTIFIER, mServerDuid);
-        addTlv(packet, DHCP6_IA_PD, mIaPd);
+        if (mIaNa != null) {
+            addTlv(packet, DHCP6_IA_NA, mIaNa);
+        }
+        if (mIaPd != null) {
+            addTlv(packet, DHCP6_IA_PD, mIaPd);
+        }
 
         packet.flip();
         return packet;

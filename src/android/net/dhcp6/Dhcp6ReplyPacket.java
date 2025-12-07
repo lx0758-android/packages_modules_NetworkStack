@@ -34,8 +34,8 @@ public class Dhcp6ReplyPacket extends Dhcp6Packet {
      * Generates a reply packet with the specified parameters.
      */
     Dhcp6ReplyPacket(int transId, @NonNull final byte[] clientDuid,
-            @NonNull final byte[] serverDuid, final byte[] iapd, boolean rapidCommit) {
-        super(transId, 0 /* elapsedTime */, clientDuid, serverDuid, iapd);
+            @NonNull final byte[] serverDuid, final byte[] iana, final byte[] iapd, boolean rapidCommit) {
+        super(transId, 0 /* elapsedTime */, clientDuid, serverDuid, iana, iapd);
         mRapidCommit = rapidCommit;
     }
 
@@ -49,7 +49,12 @@ public class Dhcp6ReplyPacket extends Dhcp6Packet {
 
         addTlv(packet, DHCP6_CLIENT_IDENTIFIER, mClientDuid);
         addTlv(packet, DHCP6_SERVER_IDENTIFIER, mServerDuid);
-        addTlv(packet, DHCP6_IA_PD, mIaPd);
+        if (mIaNa != null) {
+            addTlv(packet, DHCP6_IA_NA, mIaNa);
+        }
+        if (mIaPd != null) {
+            addTlv(packet, DHCP6_IA_PD, mIaPd);
+        }
         if (mRapidCommit) {
             addTlv(packet, DHCP6_RAPID_COMMIT);
         }

@@ -34,8 +34,8 @@ public class Dhcp6RebindPacket extends Dhcp6Packet {
      * Generates a rebind packet with the specified parameters.
      */
     Dhcp6RebindPacket(int transId, int elapsedTime, @NonNull final byte[] clientDuid,
-            @NonNull final byte[] iapd) {
-        super(transId, elapsedTime, clientDuid, null /* serverDuid */, iapd);
+            final byte[] iana, final byte[] iapd) {
+        super(transId, elapsedTime, clientDuid, null /* serverDuid */, iana, iapd);
     }
 
     /**
@@ -48,7 +48,12 @@ public class Dhcp6RebindPacket extends Dhcp6Packet {
 
         addTlv(packet, DHCP6_CLIENT_IDENTIFIER, getClientDuid());
         addTlv(packet, DHCP6_ELAPSED_TIME, (short) (mElapsedTime & 0xFFFF));
-        addTlv(packet, DHCP6_IA_PD, mIaPd);
+        if (mIaNa != null) {
+            addTlv(packet, DHCP6_IA_NA, mIaNa);
+        }
+        if (mIaPd != null) {
+            addTlv(packet, DHCP6_IA_PD, mIaPd);
+        }
 
         packet.flip();
         return packet;
