@@ -34,7 +34,7 @@ public class Dhcp6AdvertisePacket extends Dhcp6Packet {
      */
     Dhcp6AdvertisePacket(int transId, @NonNull final byte[] clientDuid,
             @NonNull final byte[] serverDuid, final byte[] iapd) {
-        super(transId, (short) 0 /* secs */, clientDuid, serverDuid, iapd);
+        super(transId, 0 /* elapsedTime */, clientDuid, serverDuid, iapd);
     }
 
     /**
@@ -42,7 +42,7 @@ public class Dhcp6AdvertisePacket extends Dhcp6Packet {
      */
     public ByteBuffer buildPacket() {
         final ByteBuffer packet = ByteBuffer.allocate(DHCP_MAX_LENGTH);
-        final int msgTypeAndTransId = (DHCP6_MESSAGE_TYPE_ADVERTISE << 24) | (mTransId & 0x0FFF);
+        final int msgTypeAndTransId = (DHCP6_MESSAGE_TYPE_ADVERTISE << 24) | mTransId;
         packet.putInt(msgTypeAndTransId);
 
         addTlv(packet, DHCP6_CLIENT_IDENTIFIER, mClientDuid);

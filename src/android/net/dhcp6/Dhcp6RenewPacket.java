@@ -33,9 +33,9 @@ public class Dhcp6RenewPacket extends Dhcp6Packet {
     /**
      * Generates a renew packet with the specified parameters.
      */
-    Dhcp6RenewPacket(int transId, short secs, @NonNull final byte[] clientDuid,
+    Dhcp6RenewPacket(int transId, int elapsedTime, @NonNull final byte[] clientDuid,
             @NonNull final byte[] serverDuid, final byte[] iapd) {
-        super(transId, secs, clientDuid, serverDuid, iapd);
+        super(transId, elapsedTime, clientDuid, serverDuid, iapd);
     }
 
     /**
@@ -43,12 +43,12 @@ public class Dhcp6RenewPacket extends Dhcp6Packet {
      */
     public ByteBuffer buildPacket() {
         final ByteBuffer packet = ByteBuffer.allocate(DHCP_MAX_LENGTH);
-        final int msgTypeAndTransId = (DHCP6_MESSAGE_TYPE_RENEW << 24) | (mTransId & 0x0FFF);
+        final int msgTypeAndTransId = (DHCP6_MESSAGE_TYPE_RENEW << 24) | mTransId;
         packet.putInt(msgTypeAndTransId);
 
-        addTlv(packet, DHCP6_SERVER_IDENTIFIER, getServerDuid());
-        addTlv(packet, DHCP6_CLIENT_IDENTIFIER, getClientDuid());
-        addTlv(packet, DHCP6_ELAPSED_TIME, mSecs);
+        addTlv(packet, DHCP6_SERVER_IDENTIFIER, mServerDuid);
+        addTlv(packet, DHCP6_CLIENT_IDENTIFIER, mClientDuid);
+        addTlv(packet, DHCP6_ELAPSED_TIME, (short) (mElapsedTime & 0xFFFF));
         addTlv(packet, DHCP6_IA_PD, mIaPd);
 
         packet.flip();
