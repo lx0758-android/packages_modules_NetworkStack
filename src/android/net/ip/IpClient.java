@@ -669,9 +669,8 @@ public class IpClient extends StateMachine {
     // Experiment flag read from device config.
     private final boolean mDhcp6NontemporaryAddressEnabled;
     private final boolean mDhcp6PrefixDelegationEnabled;
-    private final boolean mDhcp6AllowHasIpv6ForceEnabled = false;
-    private final boolean mDhcp6AllowNotDefaultRouteEnabled = false;
-    private final boolean mDhcp6AllowNotGlobalPreferredEnabled = false;
+    private final boolean mDhcp6AllowHasIpv6ForceEnabled = true;
+    private final boolean mDhcp6AllowNotDefaultRouteEnabled = true;
 
     private InterfaceParams mInterfaceParams;
 
@@ -1470,6 +1469,11 @@ public class IpClient extends StateMachine {
         if (lp.hasIpv4Address() || lp.isProvisioned() || isIpv6LinkLocalProvisioned(lp)) {
             return true;
         }
+        if (mConfiguration != null && !isIpv4Enabled()
+            && lp.hasGlobalIpv6Address()
+            && (lp.hasIpv6DefaultRoute() || mDhcp6AllowNotDefaultRouteEnabled)) {
+            return true;
+        }
         if (config == null) {
             return false;
         }
@@ -1523,6 +1527,10 @@ public class IpClient extends StateMachine {
         InitialConfiguration config = mConfiguration != null ? mConfiguration.mInitialConfig : null;
         final boolean wasProvisioned = isProvisioned(oldLp, config);
         final boolean isProvisioned = isProvisioned(newLp, config);
+
+        if (DBG) {
+            Log.d(mTag, "compareProvisioning, wasProvisioned=" + wasProvisioned + ", isProvisioned=" + isProvisioned);
+        }
 
         if (!wasProvisioned && isProvisioned) {
             delta = PROV_CHANGE_GAINED_PROVISIONING;
@@ -2033,9 +2041,12 @@ public class IpClient extends StateMachine {
                 && mIpv6AutoconfTimeoutAlarm == null) {
             mIpv6AutoconfTimeoutAlarm = new WakeupMessage(mContext, getHandler(),
                     mTag + ".EVENT_IPV6_AUTOCONF_TIMEOUT", EVENT_IPV6_AUTOCONF_TIMEOUT);
-            final long alarmTime = SystemClock.elapsedRealtime()
+            long alarmTime = SystemClock.elapsedRealtime()
                     + mDependencies.getDeviceConfigPropertyInt(CONFIG_IPV6_AUTOCONF_TIMEOUT,
                             DEFAULT_IPV6_AUTOCONF_TIMEOUT_MS);
+            if (newLp.hasIpv6DefaultRoute() || mDhcp6AllowNotDefaultRouteEnabled) {
+                alarmTime = SystemClock.elapsedRealtime();
+            }
             mIpv6AutoconfTimeoutAlarm.schedule(alarmTime);
         }
 
@@ -2944,7 +2955,7 @@ public class IpClient extends StateMachine {
                 Log.e(mTag, "Invalid IA_NA IPv6 link address " + e);
                 return;
             }
-            if (!mDhcp6AllowNotGlobalPreferredEnabled && !la.isGlobalPreferred()) {
+            if (!la.isGlobalPreferred()) {
                 Log.w(mTag, "add interface address for IA_NA, " + la + " is not a global IPv6 address");
                 return;
             }
@@ -2974,7 +2985,7 @@ public class IpClient extends StateMachine {
                 Log.e(mTag, "Invalid IA_PD IPv6 link address " + e);
                 return;
             }
-            if (!mDhcp6AllowNotGlobalPreferredEnabled && !la.isGlobalPreferred()) {
+            if (!la.isGlobalPreferred()) {
                 Log.w(mTag, "add interface address for IA_PD, " + la + " is not a global IPv6 address");
                 return;
             }
