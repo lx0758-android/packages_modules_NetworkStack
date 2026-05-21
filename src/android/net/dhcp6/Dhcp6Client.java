@@ -294,7 +294,7 @@ public class Dhcp6Client extends StateMachine {
             if (!packet.isValid(mTransId, mClientDuid)) return;
 
             boolean allInvalidAddresses = true;
-            if (!packet.mNontemporaryAddresses.iaos.isEmpty()) {
+            if (packet.mNontemporaryAddresses != null && packet.mNontemporaryAddresses.iaos != null && !packet.mNontemporaryAddresses.iaos.isEmpty()) {
                 for (IaAddressOption iao : packet.mNontemporaryAddresses.iaos) {
                     if (iao != null && iao.isValid()) {
                         allInvalidAddresses = false;
@@ -307,7 +307,7 @@ public class Dhcp6Client extends StateMachine {
                 }
             }
             boolean allInvalidPrefixes = true;
-            if (!packet.mPrefixDelegation.ipos.isEmpty()) {
+            if (packet.mPrefixDelegation != null && packet.mPrefixDelegation.ipos != null && !packet.mPrefixDelegation.ipos.isEmpty()) {
                 for (IaPrefixOption ipo : packet.mPrefixDelegation.ipos) {
                     if (ipo != null && ipo.isValid()) {
                         allInvalidPrefixes = false;
@@ -470,8 +470,8 @@ public class Dhcp6Client extends StateMachine {
     }
 
     private void notifyResult(int result, final NontemporaryAddresses iana, final PrefixDelegation iapd) {
-        final List<IaAddressOption> iaos = iana.getValidIaAddresses();
-        final List<IaPrefixOption> ipos = iapd.getValidIaPrefixes();
+        final List<IaAddressOption> iaos = iana != null ? iana.getValidIaAddresses() : null;
+        final List<IaPrefixOption> ipos = iapd != null ? iapd.getValidIaPrefixes() : null;
         mController.sendMessage(CMD_DHCP6_RESULT, result, 0, new Dhcp6Result(iaos, ipos));
     }
 
@@ -787,8 +787,8 @@ public class Dhcp6Client extends StateMachine {
             if (!(packet instanceof Dhcp6ReplyPacket)) return;
             final NontemporaryAddresses na = packet.mNontemporaryAddresses;
             final PrefixDelegation pd = packet.mPrefixDelegation;
-            if (na == null || pd == null) {
-                Log.w(TAG, "Server responded to Renew/Rebind without valid non-temporary addresses or prefix delegation option"
+            if (na == null && pd == null) {
+                Log.w(TAG, "Server responded to Renew/Rebind without valid non-temporary addresses and prefix delegation option"
                         + ", ignoring");
                 return;
             }
@@ -796,7 +796,7 @@ public class Dhcp6Client extends StateMachine {
             // Reply message contain NoBinding status code.
             Log.d(TAG, "Get a non-temporary addresses option from Reply as response to Renew/Rebind " + na);
             Log.d(TAG, "Get prefix delegation option from Reply as response to Renew/Rebind " + pd);
-            if (na.iaos.isEmpty() && pd.ipos.isEmpty()) return;
+            if ((na.iaos == null || na.iaos.isEmpty()) && (pd.ipos == null || pd.ipos.isEmpty())) return;
             mReplyNa = na;
             mReplyPd = pd;
             mServerDuid = packet.mServerDuid;

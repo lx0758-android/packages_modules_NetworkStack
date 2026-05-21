@@ -325,6 +325,7 @@ public class Dhcp6Packet {
 
         public List<IaAddressOption> getValidIaAddresses() {
             final List<IaAddressOption> validIpos = new ArrayList<IaAddressOption>();
+            if (iaos == null) return validIpos;
             for (IaAddressOption ipo : iaos) {
                 if (!ipo.isValid()) continue;
                 validIpos.add(ipo);
@@ -508,6 +509,7 @@ public class Dhcp6Packet {
          */
         public List<IaPrefixOption> getValidIaPrefixes() {
             final List<IaPrefixOption> validIpos = new ArrayList<IaPrefixOption>();
+            if (ipos == null) return validIpos;
             for (IaPrefixOption ipo : ipos) {
                 if (!ipo.isValid()) continue;
                 validIpos.add(ipo);
@@ -787,10 +789,11 @@ public class Dhcp6Packet {
             return false;
         }
         if (mNontemporaryAddresses == null && mPrefixDelegation == null) {
-            Log.e(TAG, "DHCPv6 message without IA_NA or IA_PD option, ignoring");
+            Log.e(TAG, "DHCPv6 message without IA_NA and IA_PD option, ignoring");
             return false;
         }
-        if (!mNontemporaryAddresses.isValid() && !mPrefixDelegation.isValid()) {
+        if ((mNontemporaryAddresses == null || !mNontemporaryAddresses.isValid())
+                && (mPrefixDelegation == null || !mPrefixDelegation.isValid())) {
             Log.e(TAG, "DHCPv6 message takes invalid IA_NA and IA_PD option, ignoring");
             return false;
         }

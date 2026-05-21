@@ -1470,7 +1470,7 @@ public class IpClient extends StateMachine {
             return true;
         }
         if (mConfiguration != null && !isIpv4Enabled()
-            && lp.hasGlobalIpv6Address()
+            && hasIpv6Address(lp)
             && (lp.hasIpv6DefaultRoute() || mDhcp6AllowNotDefaultRouteEnabled)) {
             return true;
         }
